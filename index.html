@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Game Zone</title>
+<style>
+/* ===== LOOK & FEEL: change colours here ===== */
+:root{--bg:#0f1226;--card:#1b1f3b;--accent:#ffb703;--text:#f1f1f1}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;background:var(--card)}
+header b{font-size:1.3rem;color:var(--accent)}header a{color:var(--text);margin-left:14px}
+main{max-width:720px;margin:auto;padding:16px}
+.card{background:var(--card);border-radius:12px;padding:14px;margin:12px 0}
+input,select,textarea,button{width:100%;padding:10px;margin:5px 0;border-radius:8px;border:0;font-size:1rem}
+button{background:var(--accent);font-weight:700;cursor:pointer}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}.tabs button{width:auto;flex:1}
+.ok{color:#6fe58a}.bad{color:#ff7b7b}.big{font-size:2.6rem;color:var(--accent);margin:6px 0}
+table{width:100%;border-collapse:collapse}td,th{padding:6px;border-bottom:1px solid #333;text-align:left;font-size:.9rem}
+</style></head><body>
+<header><b id="ev"></b><nav><a href="#/">Games</a><a href="#/staff">Staff</a></nav></header>
+<main id="app"></main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.58.0/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4.4.1/dist/email.min.js"></script>
+<script>
+// ================= EDIT HERE (settings) =================
+const CFG={
+  EVENT_NAME:"Game Zone",                       // title shown on top
+  CURRENCY:"pts",                               // 1 pt = 1 rupee (your choice)
+  SUPABASE_URL:"https://zcinfveweiirbuapsrzn.supabase.co",            // Supabase > Project Settings > API
+  SUPABASE_KEY:"sb_publishable_cJVKnUFVOnTEa9QajBBEZg_8qurMRXo",       // the "anon public" key
+  SITE_URL:"https://vabesh-lucky.github.io/gamezone/", // your final website address (keep trailing /)
+  EMAILJS_PUBLIC_KEY:"", EMAILJS_SERVICE:"", EMAILJS_TEMPLATE:""  // from emailjs.com
+};
+// ========================================================
+document.getElementById('ev').textContent=CFG.EVENT_NAME;
+const db=supabase.createClient(CFG.SUPABASE_URL,CFG.SUPABASE_KEY);
+const $=s=>document.querySelector(s),app=$('#app');
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const qrUrl=l=>'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data='+encodeURIComponent(l);
+let scanner=null;
+async function stopScan(){if(scanner){try{await scanner.stop()}catch(e){}scanner=null}}
+async function route(){
+  await stopScan();const h=location.hash||'#/';
+  if(h.startsWith('#/card/'))return card(h.slice(7));
+  if(h.startsWith('#/staff'))return staff();
+  home();
+}
+addEventListener('hashchange',route);route();
+
+// ---------- PUBLIC: games list ----------
+async function home(){
+  const{data:g}=await db.from('games').select('*').eq('active',true).order('id');
+  app.innerHTML='<h2>Games</h2>'+(g||[]).map(x=>`<div class=card><h3>${esc(x.name)}</h3><p>${esc(x.description)}</p><p><b>Entry:</b> ${x.fee} ${CFG.CURRENCY} &nbsp; <b>Prize:</b> ${esc(x.prize)}</p></div>`).join('');
+}
+// ---------- PUBLIC: participant balance page (QR opens this) ----------
+async function card(t){
+  const{data}=await db.rpc('get_card',{t});
+  app.innerHTML=data?`<div class=card><p>Hello ${esc(data.name)}</p><p>Your balance</p><div class=big>${data.balance} ${CFG.CURRENCY}</div><img src="${qrUrl(location.href)}" alt="QR" width=200><p>Show this QR at every game.</p></div>`:'<p>Card not found.</p>';
+}
+// ---------- STAFF ----------
+function login(){app.innerHTML=`<h2>Staff login</h2><input id=em placeholder="Email"><input id=pw type=password placeholder="Password"><button onclick="doLogin()">Login</button><p id=err class=bad></p>`}
+async function doLogin(){const{error}=await db.auth.signInWithPassword({email:$('#em').value.trim(),password:$('#pw').value});error?$('#err').textContent=error.message:staff()}
+async function out(){await db.auth.signOut();staff()}
+async function staff(){
+  const{data:{session}}=await db.auth.getSession();if(!session)return login();
+  const{data:p}=await db.from('profiles').select('role,name').eq('id',session.user.id).single();
+  if(!p){app.innerHTML='<p>This account has no staff role. Ask the admin.</p><button onclick="out()">Logout</button>';return}
+  const a=p.role==='admin';
+  app.innerHTML=`<p>${esc(p.name||session.user.email)} (${p.role}) <button style="width:auto" onclick="out()">Logout</button></p>
+  <div class=tabs><button onclick="scanTab()">Scan &amp; Charge</button>${a?'<button onclick="topTab()">Add Money</button><button onclick="gamesTab()">Edit Games</button><button onclick="reportTab()">Report</button>':''}</div><div id=pane></div>`;
+  scanTab();
+}
+let GAMES=[];
+async function scanTab(){
+  await stopScan();
+  const{data:g}=await db.from('games').select('*').eq('active',true).order('id');GAMES=g||[];
+  $('#pane').innerHTML='<p>Scan the participant QR</p><div id=rd></div><div id=res></div>';
+  scanner=new Html5Qrcode('rd');
+  scanner.start({facingMode:'environment'},{fps:10,qrbox:240},async txt=>{
+    const m=txt.match(/[0-9a-f]{8}-[0-9a-f-]{27}/i);if(!m)return;
+    scanner.pause(true);
+    const{data}=await db.rpc('get_card',{t:m[0]});
+    $('#res').innerHTML=data?`<div class=card><b>${esc(data.name)}</b> - balance ${data.balance} ${CFG.CURRENCY}<p>Tap the game they are playing:</p>${GAMES.map(x=>`<button onclick="charge('${m[0]}',${x.id})">${esc(x.name)} - ${x.fee} ${CFG.CURRENCY}</button>`).join('')}<button style="background:#888" onclick="scanner.resume();$('#res').innerHTML=''">Cancel</button></div>`:'<p class=bad>Unknown QR</p><button onclick="scanner.resume();$(\'#res\').innerHTML=\'\'">Scan again</button>';
+  },()=>{}).catch(e=>$('#res').innerHTML='<p class=bad>Camera error: '+esc(e)+'</p>');
+}
+async function charge(t,gid){
+  const x=GAMES.find(y=>y.id===gid);
+  if(!confirm('Deduct '+x.fee+' for '+x.name+'?'))return;
+  const{data,error}=await db.rpc('charge',{p_token:t,p_game:gid});
+  $('#res').innerHTML=`<div class=card><p class="${data&&data.ok?'ok':'bad'}">${esc(error?error.message:data.msg)}</p><button onclick="scanner.resume();$('#res').innerHTML=''">Scan next</button></div>`;
+}
+// ---------- ADMIN: add money + email QR ----------
+async function topTab(){
+  await stopScan();
+  $('#pane').innerHTML=`<div class=card><h3>Add money</h3><input id=n placeholder="Name"><input id=e type=email placeholder="Gmail"><input id=a type=number placeholder="Amount (${CFG.CURRENCY})"><button onclick="topup()">Add &amp; email QR</button><div id=out></div></div>`;
+}
+async function topup(){
+  const n=$('#n').value.trim(),e=$('#e').value.trim().toLowerCase(),a=+$('#a').value;
+  const{data,error}=await db.rpc('topup',{p_name:n,p_email:e,p_amount:a});
+  if(error)return $('#out').innerHTML='<p class=bad>'+esc(error.message)+'</p>';
+  const link=CFG.SITE_URL+'#/card/'+data.token;let mail;
+  try{await emailjs.send(CFG.EMAILJS_SERVICE,CFG.EMAILJS_TEMPLATE,{to_email:e,name:n,balance:data.balance,card_link:link,qr_image:qrUrl(link)},{publicKey:CFG.EMAILJS_PUBLIC_KEY});mail='<span class=ok>Email sent ✔</span>'}
+  catch(x){mail='<span class=bad>Email failed – show this QR to the person instead.</span>'}
+  $('#out').innerHTML=`<p>New balance: <b>${data.balance}</b> ${mail}</p><img src="${qrUrl(link)}" width=200>`;
+}
+// ---------- ADMIN: edit games ----------
+async function gamesTab(){
+  await stopScan();
+  const{data:g}=await db.from('games').select('*').order('id');
+  $('#pane').innerHTML=(g||[]).concat([{id:0,name:'',description:'',fee:0,prize:'',active:true}]).map(x=>`<div class=card id=g${x.id}>
+  <input placeholder="Game name" value="${esc(x.name)}"><textarea placeholder="Description">${esc(x.description)}</textarea>
+  <input type=number placeholder="Entry fee" value="${x.fee}"><input placeholder="Prize" value="${esc(x.prize)}">
+  <label><input type=checkbox style="width:auto" ${x.active?'checked':''}> Show on website</label>
+  <button onclick="saveGame(${x.id})">${x.id?'Save':'Add new game'}</button>${x.id?`<button onclick="delGame(${x.id})">Delete</button>`:''}</div>`).join('');
+}
+async function saveGame(id){
+  const[n,d,f,p,a]=document.querySelectorAll(`#g${id} input,#g${id} textarea`);
+  const row={name:n.value,description:d.value,fee:+f.value,prize:p.value,active:a.checked};
+  const{error}=await(id?db.from('games').update(row).eq('id',id):db.from('games').insert(row));
+  error?alert(error.message):gamesTab();
+}
+async function delGame(id){if(confirm('Delete this game?')){await db.from('games').delete().eq('id',id);gamesTab()}}
+// ---------- ADMIN: report ----------
+async function reportTab(){
+  await stopScan();
+  const{data:t}=await db.from('txns').select('amount,kind,created_at,cards(name),games(name)').order('created_at',{ascending:false}).limit(5000);
+  const{data:c}=await db.from('cards').select('balance');
+  const tx=t||[],per={};let col=0,spent=0;
+  tx.forEach(x=>{if(x.kind==='topup')col+=x.amount;else{spent-=x.amount;const k=x.games?x.games.name:'(deleted game)';per[k]=(per[k]||0)-x.amount}});
+  const held=(c||[]).reduce((s,x)=>s+x.balance,0);
+  $('#pane').innerHTML=`<div class=card><button onclick="reportTab()">Refresh</button><p>Total money added: <b>${col}</b> | Spent in games: <b>${spent}</b> | Still unspent on cards: <b>${held}</b> | Participants: <b>${(c||[]).length}</b></p>
+  <h3>Per game</h3><table>${Object.entries(per).map(([k,v])=>`<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join('')}</table>
+  <h3>Recent activity</h3><table>${tx.slice(0,50).map(x=>`<tr><td>${new Date(x.created_at).toLocaleTimeString()}</td><td>${esc(x.cards&&x.cards.name)}</td><td>${x.kind==='topup'?'added':esc(x.games&&x.games.name)}</td><td>${x.amount}</td></tr>`).join('')}</table></div>`;
+}
+</script></body></html>
